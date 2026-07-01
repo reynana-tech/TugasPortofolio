@@ -1,41 +1,20 @@
 import os
 import pymysql
+from Backend.db import get_db, close_db
 from config import Config
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def get_db():
-    """Create and return a database connection with error handling."""
-    try:
-        ca_path = Config.TIDB_SSL_CA
-        ssl_params = {'ca': ca_path} if ca_path else None
-
-        if not Config.TIDB_HOST:
-            raise Exception("TIDB_HOST environment variable is not set")
-
-        connection = pymysql.connect(
-            host=Config.TIDB_HOST,
-            port=Config.TIDB_PORT,
-            user=Config.TIDB_USER,
-            password=Config.TIDB_PASSWORD,
-            database=Config.TIDB_DB,
-            charset='utf8mb4',
-            cursorclass=pymysql.cursors.DictCursor,
-            ssl=ssl_params
-        )
-        return connection
-    except Exception as e:
-        print(f"❌ Database connection error: {e}")
-        raise
-
 
 def init_db():
-    """Initialize database tables and seed default portfolio data."""
+    """Initialize database tables and seed default portfolio data.
+    This uses the shared connection from Backend.db.get_db(). We close the
+    connection after initialization to avoid leaking connections during CLI runs.
+    """
     conn = get_db()
     try:
         with conn.cursor() as cur:
             # Create tables only if they don't exist (no DROP to preserve data)
-            
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS profiles (
                     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -54,9 +33,14 @@ def init_db():
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """)
             # Add instagram column if it doesn't exist (for existing databases)
-            cur.execute("SHOW COLUMNS FROM profiles LIKE 'instagram'")
-            if not cur.fetchone():
-                cur.execute("ALTER TABLE profiles ADD COLUMN instagram VARCHAR(200) AFTER linkedin")
+            try:
+                cur.execute("SHOW COLUMNS FROM profiles LIKE 'instagram'")
+                if not cur.fetchone():
+                    cur.execute("ALTER TABLE profiles ADD COLUMN instagram VARCHAR(200) AFTER linkedin")
+            except Exception:
+                # safe to ignore if table empty or column exists
+                pass
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS skills (
                     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -105,8 +89,9 @@ def init_db():
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
             """)
 
+            # Seed default records only when tables are empty
             cur.execute("SELECT COUNT(*) as cnt FROM profiles")
-            if cur.fetchone()['cnt'] == 0:
+            if cur.fetchone().get('cnt', 0) == 0:
                 cur.execute("""
                     INSERT INTO profiles (name, title, bio, email, phone, location, github, linkedin, photo_url)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -123,14 +108,10 @@ def init_db():
                 ))
 
             cur.execute("SELECT COUNT(*) as cnt FROM skills")
-            if cur.fetchone()['cnt'] == 0:
+            if cur.fetchone().get('cnt', 0) == 0:
                 cur.execute("""
                     INSERT INTO skills (name, category, level, icon) VALUES
-                    (%s, %s, %s, %s),
-                    (%s, %s, %s, %s),
-                    (%s, %s, %s, %s),
-                    (%s, %s, %s, %s),
-                    (%s, %s, %s, %s)
+                    (%s, %s, %s, %s), (%s, %s, %s, %s), (%s, %s, %s, %s), (%s, %s, %s, %s), (%s, %s, %s, %s)
                 """, (
                     'Python', 'Backend', 90, 'python',
                     'Flask', 'Backend', 85, 'flask',
@@ -140,7 +121,7 @@ def init_db():
                 ))
 
             cur.execute("SELECT COUNT(*) as cnt FROM experiences")
-            if cur.fetchone()['cnt'] == 0:
+            if cur.fetchone().get('cnt', 0) == 0:
                 cur.execute("""
                     INSERT INTO experiences (company, position, start_date, end_date, is_current, description, logo_url)
                     VALUES (%s, %s, %s, %s, %s, %s, %s), (%s, %s, %s, %s, %s, %s, %s)
@@ -152,71 +133,58 @@ def init_db():
                 ))
 
             cur.execute("SELECT COUNT(*) as cnt FROM projects")
-            if cur.fetchone()['cnt'] == 0:
+            if cur.fetchone().get('cnt', 0) == 0:
                 cur.execute("""
                     INSERT INTO projects (title, description, tech_stack, image_url, demo_url, repo_url, is_featured)
                     VALUES (%s, %s, %s, %s, %s, %s, %s), (%s, %s, %s, %s, %s, %s, %s)
                 """, (
-                    'Portfolio Website', 'Website portofolio interaktif berbasis Flask dan TiDB.', 'Python, Flask, HTML, CSS', 'https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=800&q=80', 'https://example.com', 'https://github.com', 1,
-                    'Sistem Informasi Akademik', 'Aplikasi sederhana untuk mengelola data akademik.', 'Python, Flask, MySQL', 'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=800&q=80', 'https://example.com', 'https://github.com', 0
+                    'Portfolio Website', 'Website portofolio interaktif berbasis Flask dan TiDB.', 'Python, Flask, HTML, CSS', 'https://images.unsplash.com/photo-1498050108023-c5249f4df085?auto=format&fit=crop&w=800&q=80', 'https://example.com/demo1', 'https://github.com/example/repo1', 1,
+                    'Sistem Informasi Akademik', 'Aplikasi sederhana untuk mengelola data akademik.', 'Python, Flask, MySQL', 'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=800&q=80', 'https://example.com/demo2', 'https://github.com/example/repo2', 0
                 ))
 
         conn.commit()
     finally:
-        conn.close()
+        # Close shared connection after init so subsequent normal requests use get_db() lifecycle
+        try:
+            close_db()
+        except Exception:
+            pass
+
+
+def _fetch_all(query, params=None):
+    conn = get_db()
+    with conn.cursor() as cur:
+        cur.execute(query, params or ())
+        return cur.fetchall() or []
+
 
 def get_profiles():
     try:
-        conn = get_db()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM profiles")
-                result = cur.fetchall()
-            return result if result else []
-        finally:
-            conn.close()
+        return _fetch_all("SELECT * FROM profiles")
     except Exception as e:
         print(f"❌ Error getting profiles: {e}")
         return []
 
+
 def get_skills():
     try:
-        conn = get_db()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM skills")
-                result = cur.fetchall()
-            return result if result else []
-        finally:
-            conn.close()
+        return _fetch_all("SELECT * FROM skills")
     except Exception as e:
         print(f"❌ Error getting skills: {e}")
         return []
 
+
 def get_projects():
     try:
-        conn = get_db()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM projects")
-                result = cur.fetchall()
-            return result if result else []
-        finally:
-            conn.close()
+        return _fetch_all("SELECT * FROM projects")
     except Exception as e:
         print(f"❌ Error getting projects: {e}")
         return []
 
+
 def get_experience():
     try:
-        conn = get_db()
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT * FROM experiences")
-                result = cur.fetchall()
-            return result if result else []
-        finally:
-            conn.close()
+        return _fetch_all("SELECT * FROM experiences")
     except Exception as e:
         print(f"❌ Error getting experiences: {e}")
         return []
