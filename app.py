@@ -72,8 +72,11 @@ def create_app():
     return app
 
 
+# Expose WSGI/ASGI app for hosting platforms (Vercel expects a top-level `app` object)
+app = create_app()
+
+
 if __name__ == '__main__':
-    app = create_app()
     try:
         from model import init_db
         init_db()
